@@ -1,19 +1,21 @@
 import streamlit as st
 import pandas as pd
 from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill
 import io
 
 # --- Configuration de la Page ---
-st.set_page_config(page_title="Mise à jour Prix (Format Préservé)", page_icon="🔄")
+st.set_page_config(page_title="Mise à jour Prix (Comparaison)", page_icon="⚖️")
 
-st.title("🔄 Mise à Jour des Prix Excel")
+st.title("⚖️ Mise à Jour : Ancien vs Nouveau")
 st.markdown("""
-**Instructions :**
-Cette application met à jour les prix d'un fichier Excel **sans casser le formatage** (couleurs, formules, etc.).
+**Fonctionnement :**
+Cette version ne remplace pas vos prix ! 
+Elle écrit le **Nouveau Prix** dans la colonne **juste à droite** de l'ancien prix.
 
-1. **Fichier Cible** : Le fichier Excel que vous voulez modifier (ex: `PCI 2026`).
-2. **Fichier Source** : Le fichier qui contient les bons prix (ex: `PCI 2024`).
-3. L'appli va chercher les Codes produits et remplacer les Prix correspondants.
+1. **Fichier Cible** : Votre fichier actuel (ex: `PCI 2026`).
+2. **Fichier Source** : Le fichier avec les nouveaux prix (ex: `PCI 2024`).
+3. Résultat : Vous aurez `Prix Actuel` | `Prix Source` côte à côte.
 """)
 
 # --- Fonctions Utilitaires ---
@@ -24,19 +26,17 @@ def clean_code(val):
     return str(val).strip().upper()
 
 def get_source_prices(file_source):
-    """Lit le fichier source avec Pandas pour extraire {Code: Prix} rapidement"""
-    # 1. Essayer de lire avec l'en-tête standard
+    """Lit le fichier source avec Pandas pour extraire {Code: Prix}"""
+    # 1. Essayer avec header=0 puis header=1
     try:
         df = pd.read_excel(file_source, header=0)
-        # Vérifier si on trouve une colonne "Code"
         cols = [str(c).upper() for c in df.columns]
         if not any("CODE" in c for c in cols):
-            # Si pas trouvé, essayer la ligne suivante (header=1)
             df = pd.read_excel(file_source, header=1)
     except:
         return None, "Erreur lecture fichier source"
 
-    # 2. Trouver les colonnes dynamiquement
+    # 2. Trouver les colonnes
     col_code = None
     col_price = None
 
@@ -45,14 +45,14 @@ def get_source_prices(file_source):
         if "CODE" in c_str or "NOMENCLATURE" in c_str:
             col_code = col
         if "PCI" in c_str or "PRIX" in c_str or "PRICE" in c_str:
-            # On préfère "PCI CAISSE" si dispo, sinon n'importe quel PCI
+            # Priorité à "PCI CAISSE" ou "PCI PCI"
             if col_price is None or "CAISSE" in c_str:
                 col_price = col
     
     if not col_code or not col_price:
-        return None, f"Colonnes introuvables. Colonnes détectées : {list(df.columns)}"
+        return None, f"Colonnes introuvables (Source). Colonnes détectées : {list(df.columns)}"
 
-    # 3. Créer le dictionnaire {Code: Prix}
+    # 3. Créer le dictionnaire
     price_dict = {}
     for _, row in df.iterrows():
         code = clean_code(row[col_code])
@@ -62,104 +62,103 @@ def get_source_prices(file_source):
             
     return price_dict, None
 
-def update_excel_file(file_target, price_dict):
-    """Ouvre le fichier cible avec OpenPyXL et met à jour les cellules"""
-    # Charger le classeur (Workbook)
+def update_excel_side_by_side(file_target, price_dict):
+    """Ouvre le fichier cible et écrit le nouveau prix À DROITE de l'ancien"""
     wb = load_workbook(file_target)
-    ws = wb.active # Feuille active
+    ws = wb.active
 
-    # 1. Scanner les 5 premières lignes pour trouver l'en-tête
+    # 1. Scanner l'en-tête (Lignes 1-5)
     header_row_idx = None
     col_map = {}
 
-    for r in range(1, 6): # On teste les lignes 1 à 5
-        row_values = [cell.value for cell in ws[r]]
-        # On cherche "Code" et "PCI" ou "Price" dans cette ligne
-        str_values = [str(v).upper() if v else "" for v in row_values]
-        
-        if any("CODE" in s for s in str_values) and (any("PCI" in s for s in str_values) or any("PRIX" in s for s in str_values)):
+    for r in range(1, 6):
+        row_values = [str(cell.value).upper() if cell.value else "" for cell in ws[r]]
+        if any("CODE" in s for s in row_values) and (any("PCI" in s for s in row_values) or any("PRIX" in s for s in row_values)):
             header_row_idx = r
-            # Créer la map {NomColonne: IndexColonne} (1-based)
-            for i, val in enumerate(str_values):
-                col_map[val] = i + 1 
+            for i, val in enumerate(row_values):
+                # On ne mappe que si la cellule n'est pas vide
+                if val: col_map[val] = i + 1 
             break
     
     if header_row_idx is None:
-        return None, "Impossible de trouver la ligne d'en-tête (Code/Prix) dans les 5 premières lignes."
+        return None, "Impossible de trouver l'en-tête (Code/Prix) dans le fichier Cible."
 
-    # 2. Identifier les index précis des colonnes
+    # 2. Identifier les colonnes
     idx_code = None
-    idx_price = None
+    idx_price_target = None
 
-    # Recherche un peu floue pour trouver la bonne colonne
     for name, idx in col_map.items():
         if "CODE" in name or "NOMENCLATURE" in name:
             idx_code = idx
         if "PCI" in name or "PRIX" in name:
-             # Priorité à "PCI CAISSE" ou "PCI PCI"
-             if idx_price is None or "CAISSE" in name or "PCI PCI" in name:
-                idx_price = idx
+             if idx_price_target is None or "CAISSE" in name or "PCI PCI" in name:
+                idx_price_target = idx
 
-    if not idx_code or not idx_price:
-        return None, f"Colonnes cibles non identifiées. En-têtes trouvés : {list(col_map.keys())}"
+    if not idx_code or not idx_price_target:
+        return None, "Colonnes cibles non identifiées."
 
-    # 3. Mettre à jour les lignes
+    # Colonne de destination = Colonne Prix + 1 (Juste à droite)
+    idx_dest = idx_price_target + 1
+
+    # 3. Ajouter un En-tête pour la nouvelle colonne
+    header_cell = ws.cell(row=header_row_idx, column=idx_dest)
+    header_cell.value = "Prix Source (Nouveau)"
+    header_cell.font = Font(bold=True, color="FF0000") # En rouge pour être visible
+
+    # 4. Remplir les prix
     count = 0
-    # On itère à partir de la ligne suivant l'en-tête
-    for row in ws.iter_rows(min_row=header_row_idx + 1):
-        cell_code = row[idx_code - 1]
-        cell_price = row[idx_price - 1]
+    # Parcourir les lignes
+    for r in range(header_row_idx + 1, ws.max_row + 1):
+        cell_code = ws.cell(row=r, column=idx_code)
         
+        # On lit le code
         code_val = clean_code(cell_code.value)
         
         if code_val in price_dict:
-            # On met à jour SEULEMENT si on a un nouveau prix
-            cell_price.value = price_dict[code_val]
+            new_price = price_dict[code_val]
+            
+            # On écrit dans la colonne de destination (à droite)
+            cell_dest = ws.cell(row=r, column=idx_dest)
+            cell_dest.value = new_price
             count += 1
 
-    # 4. Sauvegarder dans un buffer mémoire (pour le téléchargement)
+    # Sauvegarde
     buffer = io.BytesIO()
     wb.save(buffer)
     buffer.seek(0)
     
     return buffer, count
 
-
 # --- Interface Utilisateur ---
 col1, col2 = st.columns(2)
 
 with col1:
-    f_target = st.file_uploader("📝 Fichier Cible (À modifier)", type=['xlsx'])
+    f_target = st.file_uploader("📝 Fichier Cible (À compléter)", type=['xlsx'])
 
 with col2:
-    f_source = st.file_uploader("💰 Fichier Source (Prix corrects)", type=['xlsx'])
+    f_source = st.file_uploader("💰 Fichier Source (Nouveaux Prix)", type=['xlsx'])
 
 if f_target and f_source:
-    if st.button("Lancer la Mise à Jour 🚀"):
-        with st.spinner("Analyse et mise à jour en cours..."):
+    if st.button("Comparer Côte à Côte 🚀"):
+        with st.spinner("Traitement..."):
             
-            # 1. Lire les prix sources
             prices, error = get_source_prices(f_source)
             
             if error:
                 st.error(f"Erreur Source : {error}")
             else:
-                st.info(f"{len(prices)} prix trouvés dans le fichier source.")
+                st.info(f"{len(prices)} prix trouvés dans la source.")
 
-                # 2. Mettre à jour le fichier cible
-                # Important : on passe f_target directement à openpyxl
-                result_buffer, count_or_err = update_excel_file(f_target, prices)
+                result_buffer, count_or_err = update_excel_side_by_side(f_target, prices)
 
-                if isinstance(count_or_err, str): # C'est une erreur
+                if isinstance(count_or_err, str):
                     st.error(f"Erreur Cible : {count_or_err}")
                 else:
-                    st.success(f"✅ Succès ! {count_or_err} lignes mises à jour.")
+                    st.success(f"✅ Terminé ! {count_or_err} prix ajoutés dans la colonne à droite.")
                     
-                    # Bouton de téléchargement
                     st.download_button(
-                        label="📥 Télécharger le Fichier Mis à Jour",
+                        label="📥 Télécharger le Comparatif",
                         data=result_buffer,
-                        file_name="Fichier_Mis_a_Jour.xlsx",
+                        file_name="Comparatif_Prix_Cote_a_Cote.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-            st.error(f"Une erreur s'est produite : {e}")
+                    ): {e}")
