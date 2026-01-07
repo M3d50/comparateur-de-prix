@@ -1,164 +1,143 @@
 import streamlit as st
 import pandas as pd
-from openpyxl import load_workbook
-from openpyxl.styles import Font
 import io
 
-# --- Configuration de la Page ---
-st.set_page_config(page_title="Mise à jour Prix (Comparaison)", page_icon="⚖️")
+# --- Configuration ---
+st.set_page_config(page_title="Consolidateur de Prix", page_icon="⚡")
 
-st.title("⚖️ Mise à Jour : Ancien vs Nouveau")
+st.title("⚡ Consolidateur de Listes de Prix")
 st.markdown("""
-**Fonctionnement :**
-Cette version insère une colonne **"Prix Source"** juste à droite de votre prix actuel.
-Elle ne supprime rien et ne casse pas vos formules.
-
-1. **Fichier Cible** : Votre fichier actuel (ex: `PCI 2026`).
-2. **Fichier Source** : Le fichier avec les nouveaux prix (ex: `PCI 2024`).
+**Logique Appliquée :**
+1. **Référence** = Ancien Fichier.
+2. **Mise à jour** = Nouveau Fichier.
+3. Si un produit **existe dans les deux** : On affiche l'ancien et le nouveau prix.
+4. Si un produit **manque dans le nouveau** : Le nouveau prix prend la valeur de l'ancien.
+5. Si un produit est **nouveau** (ajouté) : L'ancien prix est vide, le nouveau est affiché.
 """)
 
-# --- Fonctions Utilitaires ---
+# --- Fonctions ---
 
-def clean_code(val):
-    """Nettoie le code produit pour la comparaison"""
-    if val is None: return ""
-    return str(val).strip().upper()
+def clean_code(series):
+    """Nettoyage des codes pour garantir la correspondance"""
+    return series.astype(str).str.strip().str.upper()
 
-def get_source_prices(file_source):
-    """Lit le fichier source avec Pandas pour extraire {Code: Prix}"""
-    try:
-        # Essayer avec header=0
-        df = pd.read_excel(file_source, header=0)
-        # Vérifier si on trouve des colonnes pertinentes
-        cols = [str(c).upper() for c in df.columns]
-        if not any("CODE" in c for c in cols):
-            # Sinon essayer header=1
-            df = pd.read_excel(file_source, header=1)
-    except Exception as e:
-        return None, f"Erreur lecture source: {str(e)}"
-
-    # Trouver les colonnes dynamiquement
-    col_code = None
-    col_price = None
-
+def find_column(df, keywords):
+    """Trouve la colonne correspondant aux mots-clés"""
     for col in df.columns:
-        c_str = str(col).upper()
-        if "CODE" in c_str or "NOMENCLATURE" in c_str:
-            col_code = col
-        if "PCI" in c_str or "PRIX" in c_str or "PRICE" in c_str:
-            # Priorité à "PCI CAISSE" ou "PCI PCI"
-            if col_price is None or "CAISSE" in c_str or "PCI PCI" in c_str:
-                col_price = col
+        for kw in keywords:
+            if kw.upper() in str(col).upper():
+                return col
+    return None
+
+def process_logic(file_ref, file_new):
+    # 1. Chargement des Fichiers
+    # On essaie de lire header=0, si pas de code, header=1
+    try:
+        df_ref = pd.read_excel(file_ref, header=0)
+        if not find_column(df_ref, ['Code', 'Nomenclature']):
+             df_ref = pd.read_excel(file_ref, header=1)
+    except:
+        return None, "Erreur lecture Fichier Référence"
+
+    try:
+        df_new = pd.read_excel(file_new, header=0)
+        if not find_column(df_new, ['Code', 'Nomenclature']):
+             df_new = pd.read_excel(file_new, header=1)
+    except:
+        return None, "Erreur lecture Fichier Nouveau"
+
+    # 2. Identification des Colonnes
+    # Référence (Old)
+    ref_code = find_column(df_ref, ['Code', 'Nomenclature', 'Ref'])
+    ref_price = find_column(df_ref, ['PCI', 'Prix', 'Price', 'Montant'])
+    ref_art = find_column(df_ref, ['Article', 'Designation', 'Description'])
+
+    # Nouveau (Update)
+    new_code = find_column(df_new, ['Code', 'Nomenclature', 'Ref'])
+    new_price = find_column(df_new, ['PCI', 'Prix', 'Price', 'Montant'])
+    new_art = find_column(df_new, ['Article', 'Designation', 'Description'])
+
+    if not ref_code or not ref_price or not new_code or not new_price:
+        return None, "Colonnes 'Code' ou 'Prix' introuvables. Vérifiez les fichiers."
+
+    # 3. Préparation des DataFrames
+    # On ne garde que l'essentiel pour éviter les conflits
+    df_ref = df_ref[[ref_code, ref_art, ref_price]].copy()
+    df_ref.columns = ['Code', 'Article_Ref', 'Prix_OLD']
+    df_ref['Code'] = clean_code(df_ref['Code'])
+
+    df_new = df_new[[new_code, new_art, new_price]].copy()
+    df_new.columns = ['Code', 'Article_New', 'Prix_NEW_Raw']
+    df_new['Code'] = clean_code(df_new['Code'])
+
+    # 4. FUSION (Outer Join)
+    # Cela inclut : Les communs, ceux uniquement dans Old, et ceux uniquement dans New
+    df_final = pd.merge(df_ref, df_new, on='Code', how='outer')
+
+    # 5. APPLICATION DE LA LOGIQUE (Le cœur du problème)
     
-    if not col_code or not col_price:
-        return None, f"Colonnes introuvables (Source). Colonnes vues : {list(df.columns)}"
+    # Gestion des noms d'articles (Prendre le nouveau s'il existe, sinon l'ancien)
+    df_final['Article'] = df_final['Article_New'].fillna(df_final['Article_Ref'])
 
-    # Créer le dictionnaire
-    price_dict = {}
-    for _, row in df.iterrows():
-        code = clean_code(row[col_code])
-        price = row[col_price]
-        if pd.notna(price) and isinstance(price, (int, float)):
-            price_dict[code] = round(price, 2)
-            
-    return price_dict, None
+    # Nettoyage des prix (convertir en nombre)
+    df_final['Prix_OLD'] = pd.to_numeric(df_final['Prix_OLD'], errors='coerce')
+    df_final['Prix_NEW_Raw'] = pd.to_numeric(df_final['Prix_NEW_Raw'], errors='coerce')
 
-def update_excel_side_by_side(file_target, price_dict):
-    """Ouvre le fichier cible, INSÈRE une colonne et écrit le nouveau prix"""
-    wb = load_workbook(file_target)
-    ws = wb.active
+    # LOGIQUE PRINCIPALE : Colonne "Nouveau Prix Final"
+    # Si Prix_NEW_Raw existe -> On le garde
+    # Si Prix_NEW_Raw est vide (produit manquant dans le nouveau fichier) -> On prend Prix_OLD
+    df_final['Prix_NEW_Final'] = df_final['Prix_NEW_Raw'].fillna(df_final['Prix_OLD'])
 
-    # 1. Scanner l'en-tête (Lignes 1-5)
-    header_row_idx = None
-    col_map = {}
+    # Note sur "Nouveau produit" :
+    # Si c'est un nouveau produit, 'Prix_OLD' sera déjà NaN (None) grâce au merge Outer.
+    # Donc pas besoin de forcer à None manuellement.
 
-    for r in range(1, 6):
-        row_values = [str(cell.value).upper() if cell.value else "" for cell in ws[r]]
-        # On cherche une ligne qui contient "CODE" et un "PRIX"
-        if any("CODE" in s for s in row_values) and (any("PCI" in s for s in row_values) or any("PRIX" in s for s in row_values)):
-            header_row_idx = r
-            for i, val in enumerate(row_values):
-                if val: col_map[val] = i + 1 
-            break
+    # 6. Formatage Final
+    df_final = df_final[['Code', 'Article', 'Prix_OLD', 'Prix_NEW_Final']]
+    df_final = df_final.sort_values(by='Code')
     
-    if header_row_idx is None:
-        return None, "Impossible de trouver l'en-tête (Code/Prix) dans le fichier Cible."
+    # Arrondir
+    df_final['Prix_OLD'] = df_final['Prix_OLD'].round(2)
+    df_final['Prix_NEW_Final'] = df_final['Prix_NEW_Final'].round(2)
 
-    # 2. Identifier les colonnes
-    idx_code = None
-    idx_price_target = None
+    return df_final, None
 
-    for name, idx in col_map.items():
-        if "CODE" in name or "NOMENCLATURE" in name:
-            idx_code = idx
-        if "PCI" in name or "PRIX" in name:
-             if idx_price_target is None or "CAISSE" in name or "PCI PCI" in name:
-                idx_price_target = idx
-
-    if not idx_code or not idx_price_target:
-        return None, "Colonnes cibles non identifiées."
-
-    # 3. Insérer une colonne juste à droite du prix actuel
-    idx_dest = idx_price_target + 1
-    ws.insert_cols(idx_dest) # Décale tout le reste vers la droite
-
-    # 4. Ajouter le Titre de la nouvelle colonne
-    header_cell = ws.cell(row=header_row_idx, column=idx_dest)
-    header_cell.value = "Prix Source (Nouveau)"
-    header_cell.font = Font(bold=True, color="FF0000") # Rouge
-
-    # 5. Remplir les prix
-    count = 0
-    for r in range(header_row_idx + 1, ws.max_row + 1):
-        cell_code = ws.cell(row=r, column=idx_code)
-        
-        code_val = clean_code(cell_code.value)
-        
-        if code_val in price_dict:
-            new_price = price_dict[code_val]
-            
-            # Écrire dans la nouvelle colonne vide
-            cell_dest = ws.cell(row=r, column=idx_dest)
-            cell_dest.value = new_price
-            count += 1
-
-    # Sauvegarde en mémoire
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-    
-    return buffer, count
-
-# --- Interface Utilisateur ---
+# --- Interface ---
 col1, col2 = st.columns(2)
 
 with col1:
-    f_target = st.file_uploader("📝 Fichier Cible (À compléter)", type=['xlsx'])
-
+    f_ref = st.file_uploader("📂 Fichier Référence (Ancien)", type=['xlsx', 'csv'])
 with col2:
-    f_source = st.file_uploader("💰 Fichier Source (Nouveaux Prix)", type=['xlsx'])
+    f_upd = st.file_uploader("📂 Fichier Mise à jour (Nouveau)", type=['xlsx', 'csv'])
 
-if f_target and f_source:
-    if st.button("Comparer Côte à Côte 🚀"):
-        with st.spinner("Traitement..."):
+if f_ref and f_upd:
+    if st.button("Consolider les Prix"):
+        with st.spinner("Application de la logique..."):
             
-            prices, error = get_source_prices(f_source)
+            df_result, error = process_logic(f_ref, f_upd)
             
             if error:
-                st.error(f"Erreur Source : {error}")
+                st.error(error)
             else:
-                st.info(f"{len(prices)} prix trouvés dans la source.")
-
-                result_buffer, count_or_err = update_excel_side_by_side(f_target, prices)
-
-                if isinstance(count_or_err, str):
-                    st.error(f"Erreur Cible : {count_or_err}")
-                else:
-                    st.success(f"✅ Terminé ! {count_or_err} prix ajoutés dans la nouvelle colonne.")
+                st.success(f"Traitement terminé ! {len(df_result)} produits générés.")
+                
+                # Aperçu
+                st.dataframe(df_result.head(50))
+                
+                # Export
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                    df_result.to_excel(writer, index=False)
                     
-                    st.download_button(
-                        label="📥 Télécharger le Comparatif",
-                        data=result_buffer,
-                        file_name="Comparatif_Prix_Cote_a_Cote.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                    # Formatage Excel simple (Largeur colonnes)
+                    worksheet = writer.sheets['Sheet1']
+                    worksheet.set_column('A:A', 20) # Code
+                    worksheet.set_column('B:B', 50) # Article
+                    worksheet.set_column('C:D', 15) # Prix
+                
+                st.download_button(
+                    label="📥 Télécharger le Fichier Final",
+                    data=buffer,
+                    file_name="Prix_Consolides.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
