@@ -7,12 +7,15 @@ st.set_page_config(page_title="Consolidateur de Prix", page_icon="⚡")
 
 st.title("⚡ Consolidateur de Listes de Prix")
 st.markdown("""
-**Logique Appliquée :**
-1. **Référence** = Ancien Fichier.
-2. **Mise à jour** = Nouveau Fichier.
-3. Si un produit **existe dans les deux** : On affiche l'ancien et le nouveau prix.
-4. Si un produit **manque dans le nouveau** : Le nouveau prix prend la valeur de l'ancien.
-5. Si un produit est **nouveau** (ajouté) : L'ancien prix est vide, le nouveau est affiché.
+**Correctif Colonnes :**
+Cette version donne la priorité absolue aux colonnes contenant le mot **"CAISSE"** pour éviter de prendre le "Prix Pièce".
+
+**Logique :**
+1. **Référence (Ancien)** : Prix de base.
+2. **Mise à jour (Nouveau)** : Nouveaux prix.
+3. Si le produit existe dans le nouveau -> On affiche le Nouveau Prix.
+4. Si le produit n'existe PAS dans le nouveau -> On garde l'Ancien Prix.
+5. Si c'est un nouveau produit -> On affiche le Nouveau Prix (Ancien vide).
 """)
 
 # --- Fonctions ---
@@ -21,86 +24,121 @@ def clean_code(series):
     """Nettoyage des codes pour garantir la correspondance"""
     return series.astype(str).str.strip().str.upper()
 
-def find_column(df, keywords):
-    """Trouve la colonne correspondant aux mots-clés"""
+def find_column_name(df, possible_names):
+    """Cherche une colonne spécifique (Article, Code)"""
     for col in df.columns:
-        for kw in keywords:
-            if kw.upper() in str(col).upper():
+        c_str = str(col).upper()
+        for name in possible_names:
+            if name.upper() in c_str:
                 return col
+    return None
+
+def find_price_column(df):
+    """
+    Logique intelligente pour trouver le VRAI prix.
+    Priorité : 'CAISSE' > 'PCI' > 'PRIX'
+    """
+    cols = df.columns.tolist()
+    
+    # 1. Priorité ABSOLUE : Chercher "PCI" ou "PRIX" AVEC "CAISSE"
+    for col in cols:
+        c_str = str(col).upper()
+        if ("PCI" in c_str or "PRIX" in c_str or "PRICE" in c_str) and "CAISSE" in c_str:
+            return col
+            
+    # 2. Priorité Moyenne : Chercher "PCI" spécifique (ex: PCI 2026, PCI PCI)
+    for col in cols:
+        c_str = str(col).upper()
+        # Éviter "Piece" si possible
+        if ("PCI" in c_str) and "PIECE" not in c_str:
+            return col
+
+    # 3. Dernier Recours : N'importe quoi avec "Prix" ou "Price" ou "Montant"
+    for col in cols:
+        c_str = str(col).upper()
+        if "PRIX" in c_str or "PRICE" in c_str or "MONTANT" in c_str:
+            return col
+            
     return None
 
 def process_logic(file_ref, file_new):
     # 1. Chargement des Fichiers
-    # On essaie de lire header=0, si pas de code, header=1
     try:
         df_ref = pd.read_excel(file_ref, header=0)
-        if not find_column(df_ref, ['Code', 'Nomenclature']):
+        # Si pas de colonne Code, essayer header=1
+        if not find_column_name(df_ref, ['Code', 'Nomenclature']):
              df_ref = pd.read_excel(file_ref, header=1)
     except:
-        return None, "Erreur lecture Fichier Référence"
+        return None, "Erreur lecture Fichier Référence", None, None
 
     try:
         df_new = pd.read_excel(file_new, header=0)
-        if not find_column(df_new, ['Code', 'Nomenclature']):
+        if not find_column_name(df_new, ['Code', 'Nomenclature']):
              df_new = pd.read_excel(file_new, header=1)
     except:
-        return None, "Erreur lecture Fichier Nouveau"
+        return None, "Erreur lecture Fichier Nouveau", None, None
 
     # 2. Identification des Colonnes
     # Référence (Old)
-    ref_code = find_column(df_ref, ['Code', 'Nomenclature', 'Ref'])
-    ref_price = find_column(df_ref, ['PCI', 'Prix', 'Price', 'Montant'])
-    ref_art = find_column(df_ref, ['Article', 'Designation', 'Description'])
+    ref_code = find_column_name(df_ref, ['Code', 'Nomenclature', 'Ref'])
+    ref_price = find_price_column(df_ref) # Utilise la nouvelle logique stricte
+    ref_art = find_column_name(df_ref, ['Article', 'Designation', 'Description', 'Libellé'])
 
     # Nouveau (Update)
-    new_code = find_column(df_new, ['Code', 'Nomenclature', 'Ref'])
-    new_price = find_column(df_new, ['PCI', 'Prix', 'Price', 'Montant'])
-    new_art = find_column(df_new, ['Article', 'Designation', 'Description'])
+    new_code = find_column_name(df_new, ['Code', 'Nomenclature', 'Ref'])
+    new_price = find_price_column(df_new) # Utilise la nouvelle logique stricte
+    new_art = find_column_name(df_new, ['Article', 'Designation', 'Description', 'Libellé'])
+
+    # Debug info pour l'utilisateur
+    debug_msg = {
+        "Ref_File": file_ref.name,
+        "Ref_Col_Prix_Trouvee": ref_price,
+        "New_File": file_new.name,
+        "New_Col_Prix_Trouvee": new_price
+    }
 
     if not ref_code or not ref_price or not new_code or not new_price:
-        return None, "Colonnes 'Code' ou 'Prix' introuvables. Vérifiez les fichiers."
+        return None, "Colonnes introuvables. Voir détails ci-dessous.", debug_msg, None
 
     # 3. Préparation des DataFrames
-    # On ne garde que l'essentiel pour éviter les conflits
     df_ref = df_ref[[ref_code, ref_art, ref_price]].copy()
     df_ref.columns = ['Code', 'Article_Ref', 'Prix_OLD']
     df_ref['Code'] = clean_code(df_ref['Code'])
 
     df_new = df_new[[new_code, new_art, new_price]].copy()
-    df_new.columns = ['Code', 'Article_New', 'Prix_NEW_Raw']
+    df_new.columns = ['Code', 'Article_New', 'Prix_NEW_Source']
     df_new['Code'] = clean_code(df_new['Code'])
 
     # 4. FUSION (Outer Join)
-    # Cela inclut : Les communs, ceux uniquement dans Old, et ceux uniquement dans New
     df_final = pd.merge(df_ref, df_new, on='Code', how='outer')
 
-    # 5. APPLICATION DE LA LOGIQUE (Le cœur du problème)
+    # 5. APPLICATION DE LA LOGIQUE
     
-    # Gestion des noms d'articles (Prendre le nouveau s'il existe, sinon l'ancien)
+    # Consolider Article Name
     df_final['Article'] = df_final['Article_New'].fillna(df_final['Article_Ref'])
 
-    # Nettoyage des prix (convertir en nombre)
+    # Nettoyage prix
     df_final['Prix_OLD'] = pd.to_numeric(df_final['Prix_OLD'], errors='coerce')
-    df_final['Prix_NEW_Raw'] = pd.to_numeric(df_final['Prix_NEW_Raw'], errors='coerce')
+    df_final['Prix_NEW_Source'] = pd.to_numeric(df_final['Prix_NEW_Source'], errors='coerce')
 
-    # LOGIQUE PRINCIPALE : Colonne "Nouveau Prix Final"
-    # Si Prix_NEW_Raw existe -> On le garde
-    # Si Prix_NEW_Raw est vide (produit manquant dans le nouveau fichier) -> On prend Prix_OLD
-    df_final['Prix_NEW_Final'] = df_final['Prix_NEW_Raw'].fillna(df_final['Prix_OLD'])
+    # LOGIQUE :
+    # Si le produit existe dans le fichier Nouveau -> On prend le Prix Nouveau
+    # Si le produit est MANQUANT dans le fichier Nouveau -> On garde le Prix Ancien
+    
+    # On crée une colonne finale "Prix 2026 (Consolidé)"
+    # fillna() remplit les trous du nouveau fichier avec les valeurs de l'ancien
+    df_final['Prix_Final'] = df_final['Prix_NEW_Source'].fillna(df_final['Prix_OLD'])
 
-    # Note sur "Nouveau produit" :
-    # Si c'est un nouveau produit, 'Prix_OLD' sera déjà NaN (None) grâce au merge Outer.
-    # Donc pas besoin de forcer à None manuellement.
+    # Si le produit est NOUVEAU (n'existait pas avant), Prix_OLD est déjà NaN, ce qui est correct.
 
-    # 6. Formatage Final
-    df_final = df_final[['Code', 'Article', 'Prix_OLD', 'Prix_NEW_Final']]
+    # 6. Formatage
+    df_final = df_final[['Code', 'Article', 'Prix_OLD', 'Prix_NEW_Source', 'Prix_Final']]
     df_final = df_final.sort_values(by='Code')
     
-    # Arrondir
-    df_final['Prix_OLD'] = df_final['Prix_OLD'].round(2)
-    df_final['Prix_NEW_Final'] = df_final['Prix_NEW_Final'].round(2)
+    for c in ['Prix_OLD', 'Prix_NEW_Source', 'Prix_Final']:
+        df_final[c] = df_final[c].round(2)
 
-    return df_final, None
+    return df_final, None, debug_msg, (ref_price, new_price)
 
 # --- Interface ---
 col1, col2 = st.columns(2)
@@ -112,28 +150,33 @@ with col2:
 
 if f_ref and f_upd:
     if st.button("Consolider les Prix"):
-        with st.spinner("Application de la logique..."):
+        with st.spinner("Analyse des colonnes..."):
             
-            df_result, error = process_logic(f_ref, f_upd)
+            df_result, error, debug, cols_used = process_logic(f_ref, f_upd)
             
             if error:
                 st.error(error)
+                st.json(debug) # Affiche quelle colonne a posé problème
             else:
-                st.success(f"Traitement terminé ! {len(df_result)} produits générés.")
+                st.success("Traitement terminé !")
                 
-                # Aperçu
+                # Afficher les colonnes utilisées pour rassurer l'utilisateur
+                st.info(f"""
+                ℹ️ **Colonnes détectées et utilisées :**
+                * Dans l'Ancien Fichier : `{cols_used[0]}`
+                * Dans le Nouveau Fichier : `{cols_used[1]}`
+                *(Vérifiez que ce sont bien les colonnes 'Caisse' et non 'Pièce')*
+                """)
+                
                 st.dataframe(df_result.head(50))
                 
-                # Export
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                     df_result.to_excel(writer, index=False)
-                    
-                    # Formatage Excel simple (Largeur colonnes)
                     worksheet = writer.sheets['Sheet1']
-                    worksheet.set_column('A:A', 20) # Code
-                    worksheet.set_column('B:B', 50) # Article
-                    worksheet.set_column('C:D', 15) # Prix
+                    worksheet.set_column('A:A', 20)
+                    worksheet.set_column('B:B', 50)
+                    worksheet.set_column('C:E', 15)
                 
                 st.download_button(
                     label="📥 Télécharger le Fichier Final",
