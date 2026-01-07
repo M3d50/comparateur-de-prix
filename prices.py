@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from openpyxl import load_workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Font
 import io
 
 # --- Configuration de la Page ---
@@ -10,12 +10,11 @@ st.set_page_config(page_title="Mise à jour Prix (Comparaison)", page_icon="⚖�
 st.title("⚖️ Mise à Jour : Ancien vs Nouveau")
 st.markdown("""
 **Fonctionnement :**
-Cette version ne remplace pas vos prix ! 
-Elle écrit le **Nouveau Prix** dans la colonne **juste à droite** de l'ancien prix.
+Cette version insère une colonne **"Prix Source"** juste à droite de votre prix actuel.
+Elle ne supprime rien et ne casse pas vos formules.
 
 1. **Fichier Cible** : Votre fichier actuel (ex: `PCI 2026`).
 2. **Fichier Source** : Le fichier avec les nouveaux prix (ex: `PCI 2024`).
-3. Résultat : Vous aurez `Prix Actuel` | `Prix Source` côte à côte.
 """)
 
 # --- Fonctions Utilitaires ---
@@ -27,16 +26,18 @@ def clean_code(val):
 
 def get_source_prices(file_source):
     """Lit le fichier source avec Pandas pour extraire {Code: Prix}"""
-    # 1. Essayer avec header=0 puis header=1
     try:
+        # Essayer avec header=0
         df = pd.read_excel(file_source, header=0)
+        # Vérifier si on trouve des colonnes pertinentes
         cols = [str(c).upper() for c in df.columns]
         if not any("CODE" in c for c in cols):
+            # Sinon essayer header=1
             df = pd.read_excel(file_source, header=1)
-    except:
-        return None, "Erreur lecture fichier source"
+    except Exception as e:
+        return None, f"Erreur lecture source: {str(e)}"
 
-    # 2. Trouver les colonnes
+    # Trouver les colonnes dynamiquement
     col_code = None
     col_price = None
 
@@ -46,13 +47,13 @@ def get_source_prices(file_source):
             col_code = col
         if "PCI" in c_str or "PRIX" in c_str or "PRICE" in c_str:
             # Priorité à "PCI CAISSE" ou "PCI PCI"
-            if col_price is None or "CAISSE" in c_str:
+            if col_price is None or "CAISSE" in c_str or "PCI PCI" in c_str:
                 col_price = col
     
     if not col_code or not col_price:
-        return None, f"Colonnes introuvables (Source). Colonnes détectées : {list(df.columns)}"
+        return None, f"Colonnes introuvables (Source). Colonnes vues : {list(df.columns)}"
 
-    # 3. Créer le dictionnaire
+    # Créer le dictionnaire
     price_dict = {}
     for _, row in df.iterrows():
         code = clean_code(row[col_code])
@@ -63,7 +64,7 @@ def get_source_prices(file_source):
     return price_dict, None
 
 def update_excel_side_by_side(file_target, price_dict):
-    """Ouvre le fichier cible et écrit le nouveau prix À DROITE de l'ancien"""
+    """Ouvre le fichier cible, INSÈRE une colonne et écrit le nouveau prix"""
     wb = load_workbook(file_target)
     ws = wb.active
 
@@ -73,10 +74,10 @@ def update_excel_side_by_side(file_target, price_dict):
 
     for r in range(1, 6):
         row_values = [str(cell.value).upper() if cell.value else "" for cell in ws[r]]
+        # On cherche une ligne qui contient "CODE" et un "PRIX"
         if any("CODE" in s for s in row_values) and (any("PCI" in s for s in row_values) or any("PRIX" in s for s in row_values)):
             header_row_idx = r
             for i, val in enumerate(row_values):
-                # On ne mappe que si la cellule n'est pas vide
                 if val: col_map[val] = i + 1 
             break
     
@@ -97,32 +98,31 @@ def update_excel_side_by_side(file_target, price_dict):
     if not idx_code or not idx_price_target:
         return None, "Colonnes cibles non identifiées."
 
-    # Colonne de destination = Colonne Prix + 1 (Juste à droite)
+    # 3. Insérer une colonne juste à droite du prix actuel
     idx_dest = idx_price_target + 1
+    ws.insert_cols(idx_dest) # Décale tout le reste vers la droite
 
-    # 3. Ajouter un En-tête pour la nouvelle colonne
+    # 4. Ajouter le Titre de la nouvelle colonne
     header_cell = ws.cell(row=header_row_idx, column=idx_dest)
     header_cell.value = "Prix Source (Nouveau)"
-    header_cell.font = Font(bold=True, color="FF0000") # En rouge pour être visible
+    header_cell.font = Font(bold=True, color="FF0000") # Rouge
 
-    # 4. Remplir les prix
+    # 5. Remplir les prix
     count = 0
-    # Parcourir les lignes
     for r in range(header_row_idx + 1, ws.max_row + 1):
         cell_code = ws.cell(row=r, column=idx_code)
         
-        # On lit le code
         code_val = clean_code(cell_code.value)
         
         if code_val in price_dict:
             new_price = price_dict[code_val]
             
-            # On écrit dans la colonne de destination (à droite)
+            # Écrire dans la nouvelle colonne vide
             cell_dest = ws.cell(row=r, column=idx_dest)
             cell_dest.value = new_price
             count += 1
 
-    # Sauvegarde
+    # Sauvegarde en mémoire
     buffer = io.BytesIO()
     wb.save(buffer)
     buffer.seek(0)
@@ -154,11 +154,11 @@ if f_target and f_source:
                 if isinstance(count_or_err, str):
                     st.error(f"Erreur Cible : {count_or_err}")
                 else:
-                    st.success(f"✅ Terminé ! {count_or_err} prix ajoutés dans la colonne à droite.")
+                    st.success(f"✅ Terminé ! {count_or_err} prix ajoutés dans la nouvelle colonne.")
                     
                     st.download_button(
                         label="📥 Télécharger le Comparatif",
                         data=result_buffer,
                         file_name="Comparatif_Prix_Cote_a_Cote.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    ): {e}")
+                    )
